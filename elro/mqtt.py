@@ -30,6 +30,13 @@ class MQTTPublisher:
         else:
             self.base_topic = base_topic
 
+    def topic(self, last_hierarchy):
+        """
+        The topic name for a given hierarchy endpoint
+        :param last_hierarchy: The last part of the topic
+        """
+        return f"{self.base_topic}/elro/{last_hierarchy}"
+
     def topic_name(self, device):
         """
         The topic name for a given device
@@ -40,7 +47,7 @@ class MQTTPublisher:
         else:
             last_hierarchy = device.name
 
-        return f"{self.base_topic}/elro/{last_hierarchy}"
+        return self.topic(last_hierarchy)
 
     async def device_alarm_task(self, device):
         """
@@ -56,12 +63,13 @@ class MQTTPublisher:
         :param device: The device to listen to
         """
         await device.alarm.wait()
-        async with open_mqttclient(uri=self.broker_host) as client:
-            logging.info(f"Publish on '{self.topic_name(device)}':\n"
-                         f"alarm")
-            await client.publish(f'{self.topic_name(device)}',
-                                 b'alarm',
-                                 QOS_1)
+        topic = self.topic_name(device)
+        logging.info(f"Publish on '{topic}':\n"
+                     f"alarm")
+
+        await self.client.publish(topic,
+                             b'alarm',
+                             QOS_1)
 
     async def device_update_task(self, device):
         """
@@ -77,20 +85,37 @@ class MQTTPublisher:
         :param device: The device to listen for updates for
         """
         await device.updated.wait()
-        async with open_mqttclient(uri=self.broker_host) as client:
-            logging.info(f"Publish on '{self.topic_name(device)}':\n"
-                         f"{device.json.encode('utf-8')}")
-            await client.publish(f'{self.topic_name(device)}',
-                                 device.json.encode('utf-8'),
-                                 QOS_1)
+        topic = self.topic_name(device)
+        logging.info(f"Publish on '{topic}':\n"
+                     f"{device.json.encode('utf-8')}")
+
+        await self.client.publish(topic,
+                             device.json.encode('utf-8'),
+                             QOS_1)
 
     async def handle_hub_events(self, hub):
         """
         Main loop to handle all device events
         :param hub: The hub to listen for devices
         """
-        async with trio.open_nursery() as nursery:
-            async for device_id in hub.new_device_receive_ch:
-                logging.info(f"New device registered: {hub.devices[device_id]}")
-                nursery.start_soon(self.device_update_task, hub.devices[device_id])
-                nursery.start_soon(self.device_alarm_task, hub.devices[device_id])
+        config = {
+            'uri': self.broker_host,
+            'will': {
+                'topic': self.topic('status'),
+                'message': b'offline',
+                'qos': 0x01,
+                'retain': True,
+            }
+        }
+
+        async with open_mqttclient(config=config) as self.client:
+            await self.client.publish(self.topic('status'),
+                                b'online',
+                                QOS_1,
+                                retain=True)
+
+            async with trio.open_nursery() as nursery:
+                async for device_id in hub.new_device_receive_ch:
+                    logging.info(f"New device registered: {hub.devices[device_id]}")
+                    nursery.start_soon(self.device_update_task, hub.devices[device_id])
+                    nursery.start_soon(self.device_alarm_task, hub.devices[device_id])
